@@ -43,8 +43,8 @@ export async function analyzeResume({
   form.append("cover_letter", coverLetter);
 
   const response = await fetch(
-    // "https://resume-cover-py.vercel.app/analyze-cv",
-    "http://127.0.0.1:8000/analyze-cv",
+    "https://resume-cover-py.vercel.app/analyze-cv",
+    // "http://127.0.0.1:8000/analyze-cv",
     {
       method: "POST",
       body: form,

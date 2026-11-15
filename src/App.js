@@ -3,8 +3,36 @@ import "./App.css";
 import { Document, Packer, Paragraph, HeadingLevel } from "docx";
 import { jsPDF } from "jspdf";
 
+const MAX_PDF_SIZE_BYTES = 4 * 1024 * 1024;
+const MAX_PDF_PAGES = 50;
+const MAX_RESUME_TEXT_CHARACTERS = 100000;
+
+function getRetryAfterSeconds(value) {
+  if (!value) return null;
+
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.ceil(seconds);
+  }
+
+  const retryAt = Date.parse(value);
+  if (Number.isNaN(retryAt)) return null;
+  return Math.max(0, Math.ceil((retryAt - Date.now()) / 1000));
+}
+
+function getApiErrorDetail(detail) {
+  if (typeof detail === "string") return detail.trim();
+  if (!Array.isArray(detail)) return "";
+  return detail
+    .map((item) => (item && typeof item.msg === "string" ? item.msg : ""))
+    .filter(Boolean)
+    .join("; ");
+}
+
 function App() {
+  const [inputMode, setInputMode] = useState("pdf");
   const [file, setFile] = useState(null);
+  const [resumeText, setResumeText] = useState("");
   const [previewUrl, setPreviewUrl] = useState("");
   const [error, setError] = useState("");
   const [coverLetter, setCoverLetter] = useState(false);
@@ -14,6 +42,7 @@ function App() {
   const [particleEffect, setParticleEffect] = useState(false);
   const inputRef = useRef(null);
   const [response, setResponse] = useState(null);
+  const [retrySecondsRemaining, setRetrySecondsRemaining] = useState(0);
   const canvasRef = useRef(null);
   const waveRef = useRef({ x: 0, y: 0, vx: 0, vy: 0 });
   const animationRef = useRef(null);
@@ -24,6 +53,14 @@ function App() {
       isDark ? "dark" : "light",
     );
   }, [isDark]);
+
+  useEffect(() => {
+    if (retrySecondsRemaining <= 0) return undefined;
+    const timer = window.setTimeout(() => {
+      setRetrySecondsRemaining((seconds) => Math.max(seconds - 1, 0));
+    }, 1000);
+    return () => window.clearTimeout(timer);
+  }, [retrySecondsRemaining]);
 
   // Wavy background effect
   useEffect(() => {
@@ -168,7 +205,13 @@ function App() {
       e.target.value = null;
       return;
     }
+    if (f.size > MAX_PDF_SIZE_BYTES) {
+      setError("PDFs must be no larger than 4 MB.");
+      e.target.value = null;
+      return;
+    }
     setFile(f);
+    setResponse(null);
     const url = URL.createObjectURL(f);
     setPreviewUrl(url);
   }
@@ -176,25 +219,49 @@ function App() {
   function removeFile() {
     setFile(null);
     setPreviewUrl("");
+    setResponse(null);
     setError("");
     if (inputRef.current) inputRef.current.value = null;
+  }
+
+  function handleInputModeChange(mode) {
+    setInputMode(mode);
+    setResponse(null);
+    setError("");
   }
 
   async function handleSubmit(e) {
     e.preventDefault();
     setError("");
-    if (!file) {
+    if (retrySecondsRemaining > 0) return;
+    if (inputMode === "pdf" && !file) {
       setError("Please upload a PDF resume before submitting.");
+      return;
+    }
+    if (inputMode === "text" && !resumeText.trim()) {
+      setError("Please paste your resume text before submitting.");
+      return;
+    }
+    if (
+      inputMode === "text" &&
+      resumeText.length > MAX_RESUME_TEXT_CHARACTERS
+    ) {
+      setError("Pasted resume text must be 100,000 characters or fewer.");
       return;
     }
     setLoading(true);
     try {
       const form = new FormData();
-      form.append("resume", file);
+      if (inputMode === "pdf") {
+        form.append("resume", file);
+      } else {
+        form.append("resume_text", resumeText.trim());
+      }
       form.append("cover_letter", coverLetter);
 
       const resp = await fetch(
-        "https://cv-analyse-back.vercel.app/analyze-cv",
+        "https://resume-cover-py.vercel.app/analyze-cv",
+        // "http://127.0.0.1:8000/analyze-cv",
         {
           method: "POST",
           body: form,
@@ -204,6 +271,38 @@ function App() {
       //console.log('Response:', resp);
 
       const data = await resp.json();
+      if (!resp.ok) {
+        const detail = getApiErrorDetail(data.detail);
+        const retryAfterSeconds =
+          resp.status === 429
+            ? getRetryAfterSeconds(resp.headers.get("Retry-After"))
+            : null;
+
+        if (retryAfterSeconds > 0) {
+          setRetrySecondsRemaining(retryAfterSeconds);
+        }
+
+        let message = detail || "The request could not be completed.";
+        if (resp.status === 400) {
+          message = `Invalid resume input or PDF.${detail ? ` ${detail}` : ""}`;
+        } else if (resp.status === 413) {
+          const limit =
+            inputMode === "pdf"
+              ? "PDFs must be no larger than 4 MB and no more than 50 pages."
+              : "Pasted text must be 100,000 characters or fewer.";
+          message = `${limit}${detail ? ` ${detail}` : ""}`;
+        } else if (resp.status === 422) {
+          message = `The resume is empty or could not be recognized.${detail ? ` ${detail}` : ""}`;
+        } else if (resp.status === 429) {
+          message = `Too many requests. Please wait before trying again.${detail ? ` ${detail}` : ""}`;
+        }
+        throw new Error(message);
+      }
+      if (!data.model_response) {
+        throw new Error(
+          "The server response did not include analysis results.",
+        );
+      }
 
       //console.log('Model Response Data:', data.model_response);
       setResponse(data.model_response);
@@ -280,6 +379,13 @@ function App() {
     }
   }
 
+  let submitLabel = "Submit";
+  if (loading) {
+    submitLabel = "Submitting...";
+  } else if (retrySecondsRemaining > 0) {
+    submitLabel = `Try again in ${retrySecondsRemaining}s`;
+  }
+
   return (
     <div className="app-root">
       <canvas
@@ -317,37 +423,102 @@ function App() {
         </header>
 
         <form className="card" onSubmit={handleSubmit}>
-          <div className="upload-row">
-            <label className="upload-label">
-              <input
-                ref={inputRef}
-                type="file"
-                accept=".pdf,application/pdf"
-                onChange={handleFileChange}
-                style={{ display: "none" }}
-              />
+          <div className="input-mode">
+            <span className="input-mode-label">Resume input</span>
+            <div
+              className="input-mode-toggle"
+              role="group"
+              aria-label="Resume input mode"
+            >
               <button
                 type="button"
-                className="btn btn-primary"
-                onClick={() => inputRef.current && inputRef.current.click()}
+                className={`input-mode-button ${inputMode === "pdf" ? "active" : ""}`}
+                aria-pressed={inputMode === "pdf"}
+                disabled={loading}
+                onClick={() => handleInputModeChange("pdf")}
               >
-                {file ? "Replace PDF" : "Upload PDF"}
+                PDF
               </button>
-            </label>
-
-            {file && (
-              <div className="file-info">
-                <strong>{file.name}</strong>
-                <button
-                  type="button"
-                  className="btn btn-ghost"
-                  onClick={removeFile}
-                >
-                  Remove
-                </button>
-              </div>
-            )}
+              <button
+                type="button"
+                className={`input-mode-button ${inputMode === "text" ? "active" : ""}`}
+                aria-pressed={inputMode === "text"}
+                disabled={loading}
+                onClick={() => handleInputModeChange("text")}
+              >
+                Paste text
+              </button>
+            </div>
+            <p className="input-guidance">
+              Choose one input method at a time: upload a PDF or paste resume
+              text.
+            </p>
           </div>
+
+          {inputMode === "pdf" ? (
+            <>
+              <p className="input-limit-note">
+                PDF limit: 4 MB maximum and up to {MAX_PDF_PAGES} pages.
+              </p>
+              <div className="upload-row">
+                <label className="upload-label">
+                  <input
+                    ref={inputRef}
+                    type="file"
+                    accept=".pdf,application/pdf"
+                    aria-label="Upload resume PDF"
+                    onChange={handleFileChange}
+                    style={{ display: "none" }}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-primary"
+                    disabled={loading}
+                    onClick={() => inputRef.current && inputRef.current.click()}
+                  >
+                    {file ? "Replace PDF" : "Upload PDF"}
+                  </button>
+                </label>
+
+                {file && (
+                  <div className="file-info">
+                    <strong>{file.name}</strong>
+                    <button
+                      type="button"
+                      className="btn btn-ghost"
+                      disabled={loading}
+                      onClick={removeFile}
+                    >
+                      Remove
+                    </button>
+                  </div>
+                )}
+              </div>
+            </>
+          ) : (
+            <div className="resume-text-input">
+              <label className="input-mode-label" htmlFor="resume-text">
+                Paste your resume text
+              </label>
+              <textarea
+                id="resume-text"
+                maxLength={MAX_RESUME_TEXT_CHARACTERS}
+                value={resumeText}
+                onChange={(e) => {
+                  setResumeText(e.target.value);
+                  setResponse(null);
+                  setError("");
+                }}
+                placeholder="Paste your resume text here..."
+                rows={10}
+                disabled={loading}
+              />
+              <div className="character-count" aria-live="polite">
+                {resumeText.length.toLocaleString("en-US")} /{" "}
+                {MAX_RESUME_TEXT_CHARACTERS.toLocaleString("en-US")} characters
+              </div>
+            </div>
+          )}
 
           <div className="options-row">
             <label className="checkbox">
@@ -360,11 +531,22 @@ function App() {
             </label>
           </div>
 
-          {error && <div className="error">{error}</div>}
+          {error && (
+            <div className="error" role="alert">
+              {error}
+              {retrySecondsRemaining > 0 && (
+                <span> Try again in {retrySecondsRemaining}s.</span>
+              )}
+            </div>
+          )}
 
           <div className="actions-row">
-            <button className="btn btn-submit" type="submit" disabled={loading}>
-              {loading ? "Submitting..." : "Submit"}
+            <button
+              className="btn btn-submit"
+              type="submit"
+              disabled={loading || retrySecondsRemaining > 0}
+            >
+              {submitLabel}
             </button>
           </div>
 
@@ -375,7 +557,7 @@ function App() {
             </div>
           )}
 
-          {!loading && previewUrl && !response && (
+          {!loading && inputMode === "pdf" && previewUrl && !response && (
             <div className="preview">
               <div className="preview-header">Preview</div>
               <iframe title="pdf-preview" src={previewUrl} frameBorder="0" />

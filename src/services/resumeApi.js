@@ -59,7 +59,7 @@ export async function analyzeResume({
         ? getRetryAfterSeconds(response.headers.get("Retry-After"))
         : null;
 
-    let message = detail || "The request could not be completed.";
+    let message = "The request could not be completed. Please try again.";
     if (response.status === 400) {
       message = `Invalid resume input or PDF.${detail ? ` ${detail}` : ""}`;
     } else if (response.status === 413) {
@@ -77,7 +77,11 @@ export async function analyzeResume({
     throw new ResumeApiError(message, retryAfterSeconds || 0);
   }
 
-  if (!data.model_response) {
+  if (
+    !data.model_response ||
+    typeof data.model_response !== "object" ||
+    Array.isArray(data.model_response)
+  ) {
     throw new Error("The server response did not include analysis results.");
   }
 

@@ -11,10 +11,16 @@ export async function downloadCoverLetterAsDoc(coverLetter) {
             heading: HeadingLevel.HEADING_1,
             spacing: { after: 400 },
           }),
-          new Paragraph({
-            text: coverLetter,
-            spacing: { line: 360, after: 200 },
-          }),
+          ...coverLetter
+            .replace(/\r\n?/g, "\n")
+            .split("\n")
+            .map(
+              (line) =>
+                new Paragraph({
+                  text: line,
+                  spacing: { line: 360, after: 200 },
+                }),
+            ),
         ],
       },
     ],
@@ -25,8 +31,10 @@ export async function downloadCoverLetterAsDoc(coverLetter) {
   const link = document.createElement("a");
   link.href = url;
   link.download = "cover-letter.docx";
+  document.body.appendChild(link);
   link.click();
-  window.URL.revokeObjectURL(url);
+  link.remove();
+  window.setTimeout(() => window.URL.revokeObjectURL(url), 1000);
 }
 
 export function downloadCoverLetterAsPdf(coverLetter) {
@@ -40,7 +48,10 @@ export function downloadCoverLetterAsPdf(coverLetter) {
   pdf.text("Cover Letter", margin, margin + 10);
 
   pdf.setFontSize(12);
-  const lines = pdf.splitTextToSize(coverLetter, maxWidth);
+  const lines = pdf.splitTextToSize(
+    coverLetter.replace(/\r\n?/g, "\n"),
+    maxWidth,
+  );
 
   let yPosition = margin + 25;
   const lineHeight = 7;
